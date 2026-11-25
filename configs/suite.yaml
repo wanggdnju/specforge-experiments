@@ -1,0 +1,236 @@
+# Speculation draft benchmark suite — Qwen3-8B on v4-data1
+#
+# THIS FILE IS THE SINGLE SOURCE OF TRUTH for what gets trained and measured.
+# It is a *suite manifest*, not a SpecForge run config: each `runs:` entry
+# points at a real run config under configs/bench/<run>.yaml, which is what
+# `specforge train --config` consumes.
+#
+#   训练 (per run):   specforge train --config configs/bench/<run>.yaml
+#   导出:            specforge export --to hf --checkpoint <out>/<run>-stepN ...
+#   测试 (per run):  serve with SGLang, then measure tau on each eval set
+#
+# Drive the whole sweep with:
+#   python code/sf-pipeline/run_pipeline.py --suite configs/bench/suite.yaml
+#
+# ---------------------------------------------------------------------------
+# Experimental design
+# ---------------------------------------------------------------------------
+# 6 algorithms x 2 initialisations = 12 training runs.
+#
+#   scratch   -- weights N(0, 0.02), embedding copied from the target.
+#   warmstart -- start from the pretrained draft named in `init_from`.
+#
+# The point of the pairing is to separate "what the algorithm can learn from
+# this data" from "what a pretrained draft already knows". An algorithm whose
+# scratch and warmstart rows land close together means the data taught it
+# nearly everything; a large gap means the pretrained weights carry most of it.
+#
+# Training hyperparameters are identical for every run so the rows are
+# comparable:
+#   epochs 3 (1125 steps at batch 2 x accum 4), lr 2e-4, warmup 0.04,
+#   max_grad_norm 1.0, seed 42, max_length 2048.
+
+target_model: ../../model/Qwen3-8B
+train_data: artifacts/datasets/v4-data1/train.jsonl
+vocab_mapping: ../../data/specforge/vocab_mapping/qwen3-8b-data1.pt
+
+# ---------------------------------------------------------------------------
+# Evaluation sets
+# ---------------------------------------------------------------------------
+# data1 is the in-domain set (same task the drafts trained on). The rest are
+# unseen, so they show whether a draft generalises to other text.
+# `limit` caps rows per set; 0 means use the whole file.
+eval_sets:
+  - {name: data1,     path: artifacts/datasets/v4-data1/test.jsonl, limit: 100, domain: in-domain}
+  - {name: aime25,    path: ../../datasets/aime25/test.jsonl,    limit: 30,  domain: math}
+  - {name: math500,   path: ../../datasets/math500/test.jsonl,   limit: 100, domain: math}
+  - {name: gsm8k,     path: ../../datasets/gsm8k/test.jsonl,     limit: 100, domain: math}
+  - {name: humaneval, path: ../../datasets/humaneval/test.jsonl, limit: 100, domain: code}
+  - {name: mbpp,      path: ../../datasets/mbpp/test.jsonl,      limit: 100, domain: code}
+  - {name: lcb,       path: ../../datasets/lcb/test5.jsonl,      limit: 100, domain: code}
+  - {name: mtbench,   path: ../../datasets/mtbench/question.jsonl, limit: 80, domain: chat}
+
+# ---------------------------------------------------------------------------
+# Runs
+# ---------------------------------------------------------------------------
+# `config` is relative to this directory. `sglang_algo` and `draft_tokens` are
+# what the benchmark harness passes to SGLang; they differ because the proposal
+# block size is part of each algorithm's contract, not a free knob.
+runs:
+  # ---- dflash (block 16, layers 1/9/17/25/33) -----------------------------
+  - name: bench-dflash-scratch
+    algorithm: dflash
+    init: scratch
+    config: runs/bench-dflash-scratch.yaml
+    sglang_algo: DFLASH
+    draft_tokens: 16
+
+  - name: bench-dflash-warmstart
+    algorithm: dflash
+    init: warmstart
+    init_from: ../../model/Qwen3-8B-speculator.dflash-sf
+    config: runs/bench-dflash-warmstart.yaml
+    sglang_algo: DFLASH
+    draft_tokens: 16
+
+  # ---- dflash2 (block 8, layers 2/10/18/26/34, candidate selector) ---------
+  # No strategy of its own: SpecForge drives it through `strategy: dflash` and
+  # selects the class from the draft config's architecture.
+  - name: bench-dflash2-scratch
+    algorithm: dflash2
+    init: scratch
+    config: runs/bench-dflash2-scratch.yaml
+    sglang_algo: DFLASH
+    draft_tokens: 8
+
+  - name: bench-dflash2-warmstart
+    algorithm: dflash2
+    init: warmstart
+    init_from: ../../model/Qwen3-8B-speculator.dflash2-sf
+    config: runs/bench-dflash2-warmstart.yaml
+    sglang_algo: DFLASH
+    draft_tokens: 8
+
+  # ---- domino (block 16, GRU logit correction) ----------------------------
+  - name: bench-domino-scratch
+    algorithm: domino
+    init: scratch
+    config: runs/bench-domino-scratch.yaml
+    sglang_algo: DFLASH      # SGLang routes domino by projector_type inside DFLASH
+    draft_tokens: 16
+
+  - name: bench-domino-warmstart
+    algorithm: domino
+    init: warmstart
+    init_from: ../../model/Qwen3-8B-Domino-b16-serve
+    config: runs/bench-domino-warmstart.yaml
+    sglang_algo: DFLASH
+    draft_tokens: 16
+
+  # ---- dspark (block 7) ---------------------------------------------------
+  - name: bench-dspark-scratch
+    algorithm: dspark
+    init: scratch
+    config: runs/bench-dspark-scratch.yaml
+    sglang_algo: DSPARK
+
+  - name: bench-dspark-warmstart
+    algorithm: dspark
+    init: warmstart
+    init_from: ../../model/dspark_qwen3_8b_block7-sf
+    config: runs/bench-dspark-warmstart.yaml
+    sglang_algo: DSPARK
+
+  # ---- dspine (block 16) --------------------------------------------------
+  # Trains through the dspark path in SpecForge, so it is served the same way.
+  - name: bench-dspine-scratch
+    algorithm: dspine
+    init: scratch
+    config: runs/bench-dspine-scratch.yaml
+    sglang_algo: DSPARK
+    draft_tokens: 16
+
+  - name: bench-dspine-warmstart
+    algorithm: dspine
+    init: warmstart
+    init_from: ../../model/Qwen3-8B-DSpine-train
+    config: runs/bench-dspine-warmstart.yaml
+    sglang_algo: DSPARK
+    draft_tokens: 16
+
+  # ---- eagle3 (3 aux layers 1/17/32, needs vocab mapping) -----------------
+  - name: bench-eagle3-scratch
+    algorithm: eagle3
+    init: scratch
+    config: runs/bench-eagle3-scratch.yaml
+    sglang_algo: EAGLE3
+    draft_tokens: 16
+
+  - name: bench-eagle3-warmstart
+    algorithm: eagle3
+    init: warmstart
+    init_from: ../../model/Qwen3-8B-eagle3-AngelSlim
+    config: runs/bench-eagle3-warmstart.yaml
+    sglang_algo: EAGLE3
+    draft_tokens: 16
+
+  # ---- peagle (batch_size must be 1) --------------------------------------
+  - name: bench-peagle-scratch
+    algorithm: peagle
+    init: scratch
+    config: runs/bench-peagle-scratch.yaml
+    sglang_algo: EAGLE3      # served via the EAGLE3 path (see bench_one.py)
+    draft_tokens: 16
+
+  - name: bench-peagle-warmstart
+    algorithm: peagle
+    init: warmstart
+    init_from: ../../model/Qwen3-8B-speculator.peagle
+    config: runs/bench-peagle-warmstart.yaml
+    sglang_algo: EAGLE3
+    draft_tokens: 16
+
+  # -------------------------------------------------------------------------
+  # Baselines: the downloaded checkpoints, never fine-tuned on data1.
+  #
+  # These exist to separate "what fine-tuning added" from "what the pretrained
+  # weights already knew". A warmstart row that barely beats its baseline means
+  # data1 taught it little; a large gap means the fine-tune is what earns the
+  # speedup. `draft` points at the original model directory -- nothing is
+  # copied, so these are byte-identical to what came off the hub.
+  # -------------------------------------------------------------------------
+  - name: baseline-dflash-speculator
+    algorithm: dflash
+    init: pretrained
+    draft: ../../model/Qwen3-8B-speculator.dflash-sf
+    sglang_algo: DFLASH
+    draft_tokens: 16
+
+  - name: baseline-dflash2-speculator
+    algorithm: dflash2
+    init: pretrained
+    draft: ../../model/Qwen3-8B-speculator.dflash2-sf
+    sglang_algo: DFLASH
+    draft_tokens: 8
+
+  - name: baseline-domino
+    algorithm: domino
+    init: pretrained
+    draft: ../../model/Qwen3-8B-Domino-b16-serve
+    sglang_algo: DFLASH
+    draft_tokens: 16
+
+  - name: baseline-dspark
+    algorithm: dspark
+    init: pretrained
+    draft: ../../model/dspark_qwen3_8b_block7-sf
+    sglang_algo: DSPARK
+
+  - name: baseline-dspine
+    algorithm: dspine
+    init: pretrained
+    draft: ../../model/Qwen3-8B-DSpine-b16-serve
+    sglang_algo: DSPARK
+    draft_tokens: 16
+
+  - name: baseline-eagle3
+    algorithm: eagle3
+    init: pretrained
+    draft: ../../model/Qwen3-8B-eagle3-AngelSlim
+    sglang_algo: EAGLE3
+    draft_tokens: 16
+
+  - name: baseline-peagle
+    algorithm: peagle
+    init: pretrained
+    draft: ../../model/Qwen3-8B-peagle-serve
+    sglang_algo: EAGLE3
+    draft_tokens: 16
+
+  # ---- all-8-sources (data1..data8 merged, 22431 train rows) ---------------
+  - name: bench-dspark-all8
+    algorithm: dspark
+    init: warmstart
+    init_from: ../../model/dspark_qwen3_8b_block7-sf
+    config: runs/bench-dspark-all8.yaml
+    sglang_algo: DSPARK

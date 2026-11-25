@@ -1,0 +1,28 @@
+# Machine-specific path overrides (see local.env.example)
+local.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Run outputs. These normally land inside the SpecForge checkout
+# ($SF_SPECFORGE/artifacts), but guard against a stray local run too.
+artifacts/
+outputs/
+cache/
+sglang_storage/
+
+# Model weights, in case a checkpoint is ever written next to the scripts
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.pkl
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
